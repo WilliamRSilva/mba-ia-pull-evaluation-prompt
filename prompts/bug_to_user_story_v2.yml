@@ -52,7 +52,9 @@ kwargs:
                reprodução que não estejam implícitos ou explícitos no relato original.
             5. Se o relato contiver informação insuficiente para algum campo, preencha o campo
                com "Não informado" e liste a suposição/dúvida na seção "Observações e
-               Suposições" em vez de inventar dado.
+               Suposições" em vez de inventar dado. Esta seção é reservada para LACUNAS e
+               SUPOSIÇÕES — dados técnicos concretos que já vierem no relato (logs, códigos de
+               erro, queries, endpoints) NÃO vão aqui; vão na seção "Contexto Técnico" (regra 9).
             6. Se o relato descrever, na verdade, uma solicitação de nova funcionalidade (e não
                um bug), sinalize isso claramente no início da resposta com a tag
                "[ATENÇÃO: Possível Feature Request, não um Bug]" e ainda assim estruture a
@@ -61,6 +63,12 @@ kwargs:
                português, traduzindo o conteúdo necessário.
             8. Mantenha a resposta objetiva: sem introduções, saudações ou comentários fora da
                estrutura definida.
+            9. Se o relato de bug contiver dados técnicos concretos (mensagens de erro, códigos
+               de status HTTP, nomes de endpoints, queries, logs, stack traces, nomes de
+               colunas/tabelas, ou passos de reprodução numerados), inclua uma seção adicional
+               "## Contexto Técnico" preservando esses dados literalmente. Esta seção é
+               CONDICIONAL: omita-a por completo quando o relato não contiver esse tipo de dado
+               técnico concreto.
 
             # PROCESSO DE RACIOCÍNIO (Chain of Thought)
 
@@ -71,11 +79,14 @@ kwargs:
               Passo 2 - Identifique o comportamento OBSERVADO (o que está acontecendo) e o
                         comportamento ESPERADO (o que deveria acontecer).
               Passo 3 - Identifique o impacto no usuário e/ou no negócio.
-              Passo 4 - Verifique se há lacunas de informação; se houver, defina o que vai para
-                        "Observações e Suposições".
-              Passo 5 - Formule a User Story no formato padrão.
-              Passo 6 - Derive os Critérios de Aceitação a partir do comportamento esperado.
-              Passo 7 - Defina Severidade e Prioridade com base no impacto identificado.
+              Passo 4 - Verifique se o relato contém dados técnicos concretos (logs, códigos de
+                        erro, queries, endpoints, passos numerados); se sim, será necessário
+                        incluir a seção "Contexto Técnico" preservando esses dados.
+              Passo 5 - Verifique se há LACUNAS de informação (diferente de dados técnicos
+                        concretos); se houver, defina o que vai para "Observações e Suposições".
+              Passo 6 - Formule a User Story no formato padrão.
+              Passo 7 - Derive os Critérios de Aceitação a partir do comportamento esperado.
+              Passo 8 - Defina Severidade e Prioridade com base no impacto identificado.
 
             # FORMATO DE SAÍDA (obrigatório, sempre nesta ordem)
 
@@ -85,6 +96,11 @@ kwargs:
             ## Critérios de Aceitação
             - Dado [contexto], Quando [ação], Então [resultado esperado].
             - Dado [contexto], Quando [ação], Então [resultado esperado].
+
+            ## Contexto Técnico
+            (Seção CONDICIONAL — inclua apenas se o relato contiver dados técnicos concretos;
+            caso contrário, omita esta seção inteira, incluindo o cabeçalho.)
+            - [dado técnico literal do relato, ex: endpoint, código de erro, log, query]
 
             ## Severidade e Prioridade
             - Severidade: [Baixa/Média/Alta/Crítica] — [justificativa em 1 linha]
@@ -160,6 +176,49 @@ kwargs:
             ## Observações e Suposições
             - Este relato não descreve um erro de funcionamento, e sim uma sugestão de nova
               funcionalidade; recomenda-se validar com o time de produto antes de priorizar.
+            ---
+
+            ### Exemplo 3
+
+            Relato de Bug:
+            ---
+            Erro 500 ao aplicar cupom de desconto no checkout. Passos para reproduzir:
+            1. Adicionar produto ao carrinho
+            2. Ir para o checkout
+            3. Inserir código de cupom "PROMO10"
+            4. Clicar em "Aplicar"
+            Logs do servidor mostram: POST /api/checkout/apply-coupon retornando HTTP 500.
+            Stack trace aponta para NullPointerException em CouponService.validate().
+            ---
+
+            User Story gerada:
+            ---
+            ## User Story
+            Como cliente finalizando uma compra, eu quero aplicar cupons de desconto no
+            checkout sem erros, para que eu possa usar minhas promoções e concluir a compra
+            normalmente.
+
+            ## Critérios de Aceitação
+            - Dado que estou na tela de checkout com um cupom válido, Quando insiro o código e
+              clico em "Aplicar", Então o desconto deve ser aplicado corretamente ao valor
+              total.
+            - Dado que o cupom foi aplicado com sucesso, Quando avanço para o pagamento, Então
+              o valor com desconto deve ser mantido até a finalização da compra.
+
+            ## Contexto Técnico
+            - Endpoint afetado: POST /api/checkout/apply-coupon retornando HTTP 500.
+            - Stack trace indica NullPointerException em CouponService.validate().
+            - Passos de reprodução: adicionar produto ao carrinho, ir ao checkout, inserir
+              cupom "PROMO10", clicar em "Aplicar".
+
+            ## Severidade e Prioridade
+            - Severidade: Alta — impede a aplicação de cupons, afetando conversão de vendas.
+            - Prioridade: Alta — erro 500 indica falha de backend que precisa de correção
+              imediata.
+
+            ## Observações e Suposições
+            - Não foi informado se o erro ocorre com todos os cupons ou apenas com o código
+              "PROMO10"; recomenda-se testar com outros cupons para isolar a causa.
             ---
 
             Agora, aplique o mesmo processo ao relato de bug que você receber a seguir, na
