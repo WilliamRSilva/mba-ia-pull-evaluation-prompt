@@ -334,3 +334,76 @@ python src/evaluate.py
 - **Não altere os datasets de avaliação** - apenas os prompts em `prompts/bug_to_user_story_v2.yml`
 - **Itere, itere, itere** - é normal precisar de 3-5 iterações para atingir 0.8 em todas as métricas
 - **Documente seu processo** - a jornada de otimização é tão importante quanto o resultado final
+
+---
+
+# Respostas e informações adicionais para o exercício 
+
+## 2. Técnicas aplicadas
+
+### 2.1 Role Prompting (persona e contexto) — técnica adicional escolhida
+**O que foi feito:** o modelo agora assume o papel de "Analista de Produto
+Sênior / Product Owner especializado em times ágeis e com critérios de aceitação em Gherkin.
+
+**Por quê:** Ao definir uma persona sênior de produto, o modelo tende a produzir User Stories mais próximas do padrão real usado por squads ágeis (formato "Como/eu quero/para que" + Gherkin), em vez de uma paráfrase genérica do bug. É a técnica mais eficiente para tarefas de "transformação de
+formato" como esta, porque o problema não é raciocínio complexo, e sim aderência a um padrão
+de output usado por uma função profissional específica.
+
+### 2.2 Few-shot Learning (obrigatório)
+**O que foi feito:** foram incluídos 2 exemplos completos de entrada/saída dentro do System
+Prompt:
+- Exemplo 1: um bug técnico clássico (crash de login após atualização), mostrando o
+  tratamento de informação incompleta (dispositivo/versão não informados) na seção
+  "Observações e Suposições".
+- Exemplo 2: um relato que na verdade é uma solicitação de melhoria (dark mode), mostrando
+  como o modelo deve sinalizar isso com a tag `[ATENÇÃO: Possível Feature Request, não um
+  Bug]`, um dos edge cases pedidos.
+
+**Por quê:** Few-shot reduz drasticamente a variância de formatação do LLM. Sem exemplos, o
+modelo tende a "inventar" sua própria estrutura de User Story a cada chamada. Com dois
+exemplos cobrindo casos distintos (bug real vs. feature request disfarçada de bug), o modelo
+generaliza melhor tanto o formato de saída quanto as regras de comportamento (regra 4 e 5),
+sem precisar que every edge case seja re-explicado em texto puro.
+
+### 2.3 Chain of Thought (CoT) — técnica adicional escolhida (combinada com Skeleton of Thought)
+**O que foi feito:** foi adicionada uma seção "Processo de Raciocínio" com 7 passos que o
+modelo deve seguir internamente (identificar usuário → comportamento observado/esperado →
+impacto → lacunas de informação → formular a story → derivar critérios de aceitação →
+definir severidade/prioridade) **antes** de escrever a resposta final. O prompt deixa
+explícito que esse raciocínio não deve aparecer na saída, apenas o resultado estruturado.
+
+Combinado a isso, a seção "Formato de Saída" funciona como um **Skeleton of Thought**: define
+um esqueleto fixo de 4 blocos (`## User Story`, `## Critérios de Aceitação`,
+`## Severidade e Prioridade`, `## Observações e Suposições`) que a resposta deve
+necessariamente preencher, em vez de deixar o modelo decidir livremente a estrutura.
+
+**Por quê:** CoT foi escolhido em vez de ToT ou ReAct porque a tarefa é essencialmente
+determinística e sequencial (não há múltiplos caminhos de solução concorrentes a serem
+comparados, como exigiria Tree of Thought, nem chamadas de ferramentas externas, como
+exigiria ReAct). Pedir ao modelo para "pensar passo a passo" antes de responder reduz erros
+de omissão — por exemplo, esquecer de checar se há informação suficiente para os critérios
+de aceitação, ou deixar de classificar severidade. O Skeleton of Thought garante que, mesmo
+com raciocínio interno livre, a saída final seja sempre previsível e parseável (importante se
+esse prompt alimentar um pipeline automatizado depois).
+
+## 3. Regras explícitas de comportamento
+
+Adicionadas 8 regras numeradas no System Prompt, cobrindo:
+1. Formato obrigatório da User Story.
+2. Quantidade e formato dos critérios de aceitação (Gherkin).
+3. Classificação obrigatória de severidade/prioridade com justificativa.
+4. Proibição de invenção de dados técnicos não presentes no relato (mitiga alucinação).
+5. Tratamento de informação insuficiente (edge case).
+6. Tratamento de relatos que são na verdade feature requests (edge case).
+7. Tratamento de relatos em outro idioma (edge case).
+8. Proibição de texto solto fora da estrutura definida (mantém saída limpa para uso
+   programático).
+
+## 4. Separação System vs. Human Prompt
+
+No prompt original (v1), a variável `{bug_report}` aparecia **duplicada**: uma vez dentro do
+System Prompt e outra vez isolada no Human Message. Isso foi um problema identificado e
+corrigido nesta versão: o placeholder `{bug_report}` foi **removido do System Prompt** e
+existe agora em um único lugar, no Human Message.
+
+
