@@ -5,7 +5,8 @@ Este script:
 1. Carrega dataset de avaliação de arquivo .jsonl (datasets/bug_to_user_story.jsonl)
 2. Cria/atualiza dataset no LangSmith
 3. Puxa prompts otimizados do LangSmith Hub (fonte única de verdade)
-4. Executa prompts contra o dataset
+4. Executa prompts contra o dataset e publica os resultados como um Experiment
+   vinculado ao Dataset no LangSmith (via evaluate())
 5. Calcula 5 métricas (Helpfulness, Correctness, F1-Score, Clarity, Precision)
 6. Publica resultados no dashboard do LangSmith
 7. Exibe resumo no terminal
@@ -23,13 +24,19 @@ import json
 from typing import List, Dict, Any
 from pathlib import Path
 from dotenv import load_dotenv
-from langsmith import Client
-from langchain import hub
+from langsmith import Client, evaluate
 from langchain_core.prompts import ChatPromptTemplate
 from utils import check_env_vars, format_score, print_section_header, get_llm as get_configured_llm
 from metrics import evaluate_f1_score, evaluate_clarity, evaluate_precision
 
 load_dotenv()
+
+# CORREÇÃO 1: caminho do dataset calculado a partir da localização deste
+# arquivo (não do diretório de onde o comando "python" é executado). Um
+# caminho relativo puro ("datasets/...") quebra se o script for rodado de
+# dentro de src/ em vez da raiz do projeto.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATASET_PATH = PROJECT_ROOT / "datasets" / "bug_to_user_story.jsonl"
 
 
 def get_llm():
@@ -102,10 +109,23 @@ def create_evaluation_dataset(client: Client, dataset_name: str, jsonl_path: str
         return dataset_name
 
 
-def pull_prompt_from_langsmith(prompt_name: str) -> ChatPromptTemplate:
+def pull_prompt_from_langsmith(client: Client, prompt_name: str) -> ChatPromptTemplate:
     try:
         print(f"   Puxando prompt do LangSmith Hub: {prompt_name}")
-        prompt = hub.pull(prompt_name)
+        # CORREÇÃO 2: usar client.pull_prompt() (langsmith) em vez de
+        # langchain.hub.pull(). O langchain.hub é um wrapper legado "limitado"
+        # (ver docs.langchain.com/langsmith/manage-prompts-programmatically)
+        # que pode não aplicar o novo gate de segurança de pulls públicos da
+        # mesma forma que o client direto aplica. Usando client.pull_prompt,
+        # a flag abaixo precisa ser explícita — o que é mais seguro e
+        # transparente sobre o que está sendo confiado.
+        # dangerously_pull_public_prompt=True: seguro aqui porque o prompt
+        # puxado é sempre o do próprio autor deste projeto (ver
+        # prompts_to_evaluate em main()), nunca um prompt de terceiros.
+        prompt = client.pull_prompt(
+            prompt_name,
+            dangerously_pull_public_prompt=True,
+        )
         print(f"   ✓ Prompt carregado com sucesso")
         return prompt
 
@@ -140,42 +160,72 @@ def pull_prompt_from_langsmith(prompt_name: str) -> ChatPromptTemplate:
         raise
 
 
-def evaluate_prompt_on_example(
-    prompt_template: ChatPromptTemplate,
-    example: Any,
-    llm: Any
-) -> Dict[str, Any]:
-    try:
-        inputs = example.inputs if hasattr(example, 'inputs') else {}
-        outputs = example.outputs if hasattr(example, 'outputs') else {}
-
+def build_target(prompt_template: ChatPromptTemplate, llm: Any):
+    """
+    Função "target" exigida pelo evaluate() do LangSmith: recebe os `inputs`
+    de um Example do dataset e retorna os `outputs` produzidos pelo prompt.
+    """
+    def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
         chain = prompt_template | llm
-
         response = chain.invoke(inputs)
         answer = response.content
 
-        reference = outputs.get("reference", "") if isinstance(outputs, dict) else ""
+        question = inputs.get(
+            "question", inputs.get("bug_report", inputs.get("pr_title", "N/A"))
+        ) if isinstance(inputs, dict) else "N/A"
 
-        if isinstance(inputs, dict):
-            question = inputs.get("question", inputs.get("bug_report", inputs.get("pr_title", "N/A")))
+        return {"answer": answer, "question": question}
+
+    return target
+
+
+def build_metrics_evaluator(total: int):
+    """
+    Cria o evaluator combinado, com acompanhamento amigável no terminal
+    (uma linha por exemplo, como no fluxo manual antigo), além de calcular
+    as 5 métricas exigidas pelo evaluate() do LangSmith.
+    """
+    from threading import Lock
+    counter = {"n": 0}
+    lock = Lock()
+
+    def combined_metrics_evaluator(run, example) -> Dict[str, Any]:
+        run_outputs = run.outputs or {}
+        example_outputs = example.outputs or {}
+
+        answer = run_outputs.get("answer", "")
+        question = run_outputs.get("question", "N/A")
+        reference = example_outputs.get("reference", "")
+
+        if not answer:
+            scores = {k: 0.0 for k in ("f1_score", "clarity", "precision", "helpfulness", "correctness")}
         else:
-            question = "N/A"
+            f1 = evaluate_f1_score(question, answer, reference)["score"]
+            clarity = evaluate_clarity(question, answer, reference)["score"]
+            precision = evaluate_precision(question, answer, reference)["score"]
+            scores = {
+                "f1_score": round(f1, 4),
+                "clarity": round(clarity, 4),
+                "precision": round(precision, 4),
+                "helpfulness": round((clarity + precision) / 2, 4),
+                "correctness": round((f1 + precision) / 2, 4),
+            }
 
-        return {
-            "answer": answer,
-            "reference": reference,
-            "question": question
-        }
+        # Lock porque o evaluate() pode chamar este evaluator em paralelo
+        # (concorrência entre exemplos); sem o lock, o contador poderia
+        # repetir ou pular números.
+        with lock:
+            counter["n"] += 1
+            i = counter["n"]
 
-    except Exception as e:
-        print(f"      ⚠️  Erro ao avaliar exemplo: {e}")
-        import traceback
-        print(f"      Traceback: {traceback.format_exc()}")
-        return {
-            "answer": "",
-            "reference": "",
-            "question": ""
-        }
+        print(
+            f"      [{i}/{total}] F1:{scores['f1_score']:.2f} "
+            f"Clarity:{scores['clarity']:.2f} Precision:{scores['precision']:.2f}"
+        )
+
+        return {"results": [{"key": key, "score": score} for key, score in scores.items()]}
+
+    return combined_metrics_evaluator
 
 
 def evaluate_prompt(
@@ -186,46 +236,42 @@ def evaluate_prompt(
     print(f"\n🔍 Avaliando: {prompt_name}")
 
     try:
-        prompt_template = pull_prompt_from_langsmith(prompt_name)
-
-        examples = list(client.list_examples(dataset_name=dataset_name))
-        print(f"   Dataset: {len(examples)} exemplos")
-
+        prompt_template = pull_prompt_from_langsmith(client, prompt_name)
         llm = get_llm()
+        target = build_target(prompt_template, llm)
 
-        f1_scores = []
-        clarity_scores = []
-        precision_scores = []
-
+        examples_count = len(list(client.list_examples(dataset_name=dataset_name)))
+        print(f"   Dataset: {examples_count} exemplos")
         print("   Avaliando exemplos...")
 
-        for i, example in enumerate(examples, 1):
-            result = evaluate_prompt_on_example(prompt_template, example, llm)
+        metrics_evaluator = build_metrics_evaluator(examples_count)
 
-            if result["answer"]:
-                f1 = evaluate_f1_score(result["question"], result["answer"], result["reference"])
-                clarity = evaluate_clarity(result["question"], result["answer"], result["reference"])
-                precision = evaluate_precision(result["question"], result["answer"], result["reference"])
+        # CORREÇÃO 3 (principal): a chamada abaixo é o que efetivamente cria
+        # um Experiment vinculado ao Dataset no LangSmith. O script original
+        # apenas rodava um loop manual e imprimia os scores no terminal, sem
+        # nunca registrar nada na plataforma — por isso o Dataset aparecia
+        # sem nenhum Experiment associado no dashboard.
+        experiment_results = evaluate(
+            target,
+            data=dataset_name,
+            evaluators=[metrics_evaluator],
+            experiment_prefix=prompt_name.replace("/", "-"),
+            description=f"Avaliação automática do prompt '{prompt_name}'",
+            client=client,
+        )
 
-                f1_scores.append(f1["score"])
-                clarity_scores.append(clarity["score"])
-                precision_scores.append(precision["score"])
-
-                print(f"      [{i}/{len(examples)}] F1:{f1['score']:.2f} Clarity:{clarity['score']:.2f} Precision:{precision['score']:.2f}")
-
-        avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
-        avg_clarity = sum(clarity_scores) / len(clarity_scores) if clarity_scores else 0.0
-        avg_precision = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
-
-        avg_helpfulness = (avg_clarity + avg_precision) / 2
-        avg_correctness = (avg_f1 + avg_precision) / 2
+        # Agrega os scores retornados pelo experimento para exibir o resumo no terminal
+        scores_accum: Dict[str, list] = {
+            "f1_score": [], "clarity": [], "precision": [], "helpfulness": [], "correctness": []
+        }
+        for row in experiment_results:
+            for eval_result in row["evaluation_results"]["results"]:
+                if eval_result.key in scores_accum and eval_result.score is not None:
+                    scores_accum[eval_result.key].append(eval_result.score)
 
         return {
-            "helpfulness": round(avg_helpfulness, 4),
-            "correctness": round(avg_correctness, 4),
-            "f1_score": round(avg_f1, 4),
-            "clarity": round(avg_clarity, 4),
-            "precision": round(avg_precision, 4)
+            key: round(sum(values) / len(values), 4) if values else 0.0
+            for key, values in scores_accum.items()
         }
 
     except Exception as e:
@@ -297,15 +343,15 @@ def main():
     client = Client()
     project_name = os.getenv("LANGSMITH_PROJECT", "prompt-optimization-challenge-resolved")
 
-    jsonl_path = "datasets/bug_to_user_story.jsonl"
+    jsonl_path = DEFAULT_DATASET_PATH
 
-    if not Path(jsonl_path).exists():
+    if not jsonl_path.exists():
         print(f"❌ Arquivo de dataset não encontrado: {jsonl_path}")
         print("\nCertifique-se de que o arquivo existe antes de continuar.")
         return 1
 
     dataset_name = f"{project_name}-eval"
-    create_evaluation_dataset(client, dataset_name, jsonl_path)
+    create_evaluation_dataset(client, dataset_name, str(jsonl_path))
 
     print("\n" + "=" * 70)
     print("PROMPTS PARA AVALIAR")
