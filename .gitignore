@@ -46,4 +46,4 @@ ENV/
 
 # Project specific
 results/
-.claude/
+.claude/.venv/
